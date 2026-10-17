@@ -70,7 +70,7 @@ Random seeds are fixed (`SEED = 7`). SV1 shot results vary slightly from run to 
 
 ## AI use
 
-_TODO: confirm and edit._ We used **Claude Code** (Anthropic's AI coding agent) throughout:
+We used **Claude Code** (Anthropic's AI coding agent) throughout:
 
 - It read the challenge files and proposed the approach (extending the warm-up's constrained QAOA to all 24 qubits).
 - It wrote the code in Sections 7 and 8 of `solution.ipynb`: the classical checks, the fast subspace simulator, the angle tuning, the decoder and the bonus generalization. It also set up this repository and drafted this README.
