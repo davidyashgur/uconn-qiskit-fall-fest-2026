@@ -1,23 +1,23 @@
 # Instant Insanity with constrained QAOA
 
-Our submission for the qBraid challenge at **Qiskit Fall Fest Connecticut 2026**: stack four coloured cubes so every side of the tower shows every colour once, using a quantum algorithm run on AWS SV1 through qBraid.
+Our submission for the qBraid challenge at **Qiskit Fall Fest Connecticut 2026**: stack four colored cubes so every side of the tower shows every color once, using a quantum algorithm run on AWS SV1 through qBraid.
 
 ## Team
 
-_TODO: names_
+Anthony Secora | Kajal Singh | Tyler Hubeny | David Yashgur
 
 ## Level reached
 
 **Core**, run on SV1: the full four-cube puzzle (front/back and left/right) on 24 qubits.
-**Bonus**, partly: the same method generalized to N cubes and N colours, tuned and simulated exactly for N = 5 and 6.
+**Bonus**, partly: the same method generalized to N cubes and N colors, tuned and simulated exactly for N = 5 and 6.
 
 ## Approach
 
 **Encoding.** Each cube gets 6 qubits in two blocks of 3: one block says which opposite-face pair faces front/back, the other which pair faces left/right (one-hot, so exactly one qubit per block is 1). Four cubes give 8 blocks, 24 qubits.
 
-**Cost.** A Hamiltonian made of Z and ZZ terms scores each choice: a penalty when a colour does not appear exactly twice on front/back or on left/right, and a penalty when one pair is used for both axes. It is 0 only for a solved tower.
+**Cost.** A Hamiltonian made of Z and ZZ terms scores each choice: a penalty when a color does not appear exactly twice on front/back or on left/right, and a penalty when one pair is used for both axes. It is 0 only for a solved tower.
 
-**Algorithm: constrained QAOA.** Every block starts in a W state (an equal mix of its three one-hot options) and is mixed with XY (`XXPlusYYGate`) mixers, which move the 1 inside a block but never create or destroy one. So the circuit only explores the 3⁸ = 6,561 valid choices instead of 2²⁴ ≈ 16.8 million bitstrings, and the "one pair per axis" rule never needs a penalty.
+**Algorithm: constrained QAOA.** Every block starts in a W state (an equal mix of its three one-hot options) and is mixed with XY (`XXPlusYYGate`) mixers, which move the 1 inside a block but never create or destroy one. So the circuit only explores the 3⁸ = 6,561 valid choices instead of 2²⁴ ≈ 16.8 million bit strings, and the "one pair per axis" rule never needs a penalty.
 
 **Tuning.** Because the circuit never leaves the 6,561 valid choices, we simulate it exactly on those choices alone (a 3×3 mixer matrix per block). That makes tuning fast: a grid search at p = 1, then COBYLA adding one layer at a time up to p = 8. The tuned circuit then runs on SV1.
 
@@ -28,7 +28,7 @@ All in `solution.ipynb`, Section 7.1 onward:
 - The Hamiltonian equals the classical `cost` on all 6,561 valid choices (largest gap 0).
 - The lowest-energy choices (energy 0) are **exactly** the 2 choices an independent tower checker (`solves(tower_from(...))`) accepts: the tower and its quarter turn. Everything else has energy ≥ 2.
 - Our fast simulator matches Qiskit Aer running the real 24-qubit circuit to ~1e-17, and the real circuit puts no probability outside the valid choices.
-- The bitstring decoder is tested on the known answer (minding Qiskit's bit order) before use.
+- The bit string decoder is tested on the known answer (minding Qiskit's bit order) before use.
 - Every shot is decoded and run through the tower checker; only towers that pass count as correct.
 - For the bonus, the same checks run for each N, and our general Hamiltonian reproduces the starter's `build_hamiltonian` exactly on four cubes.
 
