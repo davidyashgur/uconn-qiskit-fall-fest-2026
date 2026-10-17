@@ -8,3 +8,345 @@ matplotlib
 networkx
 pylatexenc
 jupyterlab
+
+"""
+Instant Insanity - quantum algorithms (numpy reference simulation).
+
+Implements and benchmarks, on the real commercial puzzle:
+  A. QAOA baseline          X mixer + penalties, mean-energy objective
+  B. QAOA feasible mixer    starts in, and never leaves, the valid states
+  C. QAOA feasible + CVaR   same, optimising the best-alpha tail of shots
+  D. Amplitude amplification (Grover) over the valid states
+
+instant_insanity_qiskit.py builds the same circuits in Qiskit.
+
+Encoding: 11 qubits
+-------------------
+Graph theory says each cube only needs (front/back axis, left/right axis),
+a pair of different axes: 6 options. Swapping the two roles is just the
+whole stack turned 90 degrees, so we break that symmetry by requiring
+FB axis < LR axis for cube 1 (3 options -> 2 qubits). Cubes 2-4 use 3 qubits.
+
+    2 + 3 + 3 + 3 = 11 qubits, 2,048 basis states
+    3 * 6^3 = 648 valid states, exactly 1 of which solves the puzzle
+
+Cost Hamiltonian (Pauli-Z polynomial, built from cube colors only)
+-----------------------------------------------------------------
+    H = sum_c (deg_FB(c) - 2)^2 + sum_c (deg_LR(c) - 2)^2 + P * #invalid codes
+H = 0 exactly at the solution.
+"""
+
+import numpy as np
+from scipy.optimize import minimize
+
+from instant_insanity_classical import (
+    CUBES, COLORS, ORIENTATIONS, axis_colors, orient_factor, realize,
+    is_solution, print_stack,
+)
+
+ALL_PAIRS = [(a, b) for a in range(3) for b in range(3) if a != b]
+SYM_PAIRS = [(a, b) for a, b in ALL_PAIRS if a < b]
+
+
+def register_layout(n_cubes=4, break_symmetry=True):
+    """Allowed (FB, LR) pairs, qubit offset and width for each cube's register."""
+    regs, offset = [], 0
+    for i in range(n_cubes):
+        allowed = SYM_PAIRS if (i == 0 and break_symmetry) else ALL_PAIRS
+        width = int(np.ceil(np.log2(len(allowed))))
+        regs.append({"allowed": allowed, "offset": offset, "width": width})
+        offset += width
+    return regs, offset
+
+
+REGS, N_QUBITS = register_layout()
+DIM = 2 ** N_QUBITS
+
+
+# --------------------------------------------------------------------------
+# Pauli-Z polynomial algebra: {frozenset(qubits): coeff}; Z_q^2 = I
+# --------------------------------------------------------------------------
+def p_add(*ps):
+    out = {}
+    for p in ps:
+        for k, v in p.items():
+            out[k] = out.get(k, 0.0) + v
+    return {k: v for k, v in out.items() if abs(v) > 1e-12}
+
+
+def p_mul(p, q):
+    out = {}
+    for k1, v1 in p.items():
+        for k2, v2 in q.items():
+            out[k1 ^ k2] = out.get(k1 ^ k2, 0.0) + v1 * v2
+    return {k: v for k, v in out.items() if abs(v) > 1e-12}
+
+
+def p_scale(p, s):
+    return {k: v * s for k, v in p.items()}
+
+
+def code_indicator(reg, code):
+    """Projector |code><code| on one register = product of (I +- Z)/2."""
+    poly = {frozenset(): 1.0}
+    for k in range(reg["width"]):
+        sign = 1.0 if ((code >> k) & 1) == 0 else -1.0
+        poly = p_mul(poly, {frozenset(): 0.5, frozenset([reg["offset"] + k]): 0.5 * sign})
+    return poly
+
+
+def build_cost_hamiltonian(cubes, regs=REGS, penalty=2.0):
+    n_colors = len(cubes)
+    H = {}
+    for role in (0, 1):                                   # 0 = FB, 1 = LR
+        for color in range(n_colors):
+            deg = {frozenset(): -2.0}
+            for cube, reg in zip(cubes, regs):
+                for code, pair in enumerate(reg["allowed"]):
+                    m = axis_colors(cube, pair[role]).count(color)
+                    if m:
+                        deg = p_add(deg, p_scale(code_indicator(reg, code), m))
+            H = p_add(H, p_mul(deg, deg))
+    for reg in regs:                                      # unused bit patterns
+        for code in range(len(reg["allowed"]), 2 ** reg["width"]):
+            H = p_add(H, p_scale(code_indicator(reg, code), penalty))
+    return H
+
+
+# --------------------------------------------------------------------------
+# Decoding and classical verification (runs on every measured shot)
+# --------------------------------------------------------------------------
+def decode(index, regs=REGS):
+    return [(index >> r["offset"]) & ((1 << r["width"]) - 1) for r in regs]
+
+
+def classical_cost(cubes, codes, regs=REGS, penalty=2.0):
+    cost = 0.0
+    for role in (0, 1):
+        deg = [0] * len(cubes)
+        for cube, code, reg in zip(cubes, codes, regs):
+            if code < len(reg["allowed"]):
+                for c in axis_colors(cube, reg["allowed"][code][role]):
+                    deg[c] += 1
+        cost += sum((d - 2) ** 2 for d in deg)
+    return cost + penalty * sum(c >= len(r["allowed"]) for c, r in zip(codes, regs))
+
+
+def to_physical_stack(cubes, codes, regs=REGS):
+    if any(c >= len(r["allowed"]) for c, r in zip(codes, regs)):
+        return None
+    fb = tuple(r["allowed"][c][0] for c, r in zip(codes, regs))
+    lr = tuple(r["allowed"][c][1] for c, r in zip(codes, regs))
+    try:
+        fbo, lro = orient_factor(cubes, fb), orient_factor(cubes, lr)
+    except (TypeError, ValueError):
+        return None
+    states = [realize(fbo[i], lro[i]) for i in range(len(cubes))]
+    return states if is_solution(cubes, [ORIENTATIONS[s] for s in states]) else None
+
+
+# --------------------------------------------------------------------------
+# Simulation helpers
+# --------------------------------------------------------------------------
+def diagonal_from_poly(poly, n=N_QUBITS):
+    idx = np.arange(2 ** n)
+    z = 1 - 2 * ((idx[:, None] >> np.arange(n)) & 1)
+    diag = np.zeros(2 ** n)
+    for qubits, c in poly.items():
+        term = np.ones(2 ** n)
+        for q in qubits:
+            term = term * z[:, q]
+        diag += c * term
+    return diag
+
+
+def feasible_mask(regs=REGS):
+    codes = np.array([decode(i, regs) for i in range(DIM)])
+    return np.all([codes[:, j] < len(r["allowed"]) for j, r in enumerate(regs)], axis=0)
+
+
+def register_uniform(reg):
+    """|s> = uniform superposition over the register's allowed codes."""
+    s = np.zeros(2 ** reg["width"])
+    s[: len(reg["allowed"])] = 1 / np.sqrt(len(reg["allowed"]))
+    return s
+
+
+def prep_unitary(reg):
+    """A unitary whose first column is |s> (so A|0...0> = |s>). Used in Qiskit."""
+    s = register_uniform(reg)
+    M = np.eye(len(s))
+    M[:, 0] = s
+    Q, _ = np.linalg.qr(M)
+    if Q[:, 0] @ s < 0:
+        Q[:, 0] *= -1
+    return Q
+
+
+def apply_on_register(state, reg, U):
+    """Apply a 2^w x 2^w matrix U to one register of the statevector."""
+    w, off = reg["width"], reg["offset"]
+    psi = state.reshape(-1, 2 ** w, 2 ** off)
+    return np.einsum("ij,ajb->aib", U, psi).reshape(-1)
+
+
+def x_mixer(beta, reg):
+    rx = np.array([[np.cos(beta), -1j * np.sin(beta)], [-1j * np.sin(beta), np.cos(beta)]])
+    U = np.array([[1.0]])
+    for _ in range(reg["width"]):
+        U = np.kron(rx, U)
+    return U
+
+
+def feasible_mixer(beta, reg):
+    """exp(-i beta K) with K = all-ones matrix on the allowed codes
+    (complete-graph mixer). K = k|s><s|, so U = I + (e^{-i beta k} - 1)|s><s|.
+    Mixes valid codes only; invalid codes are never reached."""
+    s = register_uniform(reg)
+    k = len(reg["allowed"])
+    return np.eye(len(s)) + (np.exp(-1j * beta * k) - 1) * np.outer(s, s)
+
+
+# --------------------------------------------------------------------------
+# QAOA
+# --------------------------------------------------------------------------
+_INIT_CACHE = {}
+
+
+def initial_state(kind):
+    if kind in _INIT_CACHE:
+        return _INIT_CACHE[kind].copy()
+    _INIT_CACHE[kind] = _initial_state(kind)
+    return _INIT_CACHE[kind].copy()
+
+
+def _initial_state(kind):
+    if kind == "x":
+        return np.full(DIM, 1 / np.sqrt(DIM), dtype=complex)
+    state = np.zeros(DIM, dtype=complex)
+    state[0] = 1.0
+    for reg in REGS:
+        state = apply_on_register(state, reg, prep_unitary(reg))
+    return state
+
+
+def qaoa_state(params, diag, kind):
+    p = len(params) // 2
+    mixer = x_mixer if kind == "x" else feasible_mixer
+    state = initial_state(kind)
+    for g, b in zip(params[:p], params[p:]):
+        state = state * np.exp(-1j * g * diag)            # cost layer
+        for reg in REGS:                                   # mixer layer
+            state = apply_on_register(state, reg, mixer(b, reg))
+    return state
+
+
+def objective(params, diag, kind, alpha):
+    """Mean energy (alpha=1) or CVaR_alpha: mean of the lowest-alpha probability mass."""
+    probs = np.abs(qaoa_state(params, diag, kind)) ** 2
+    if alpha >= 1:
+        return float(probs @ diag)
+    order = np.argsort(diag)
+    pr, en = probs[order], diag[order]
+    cum = np.cumsum(pr)
+    take = np.clip(alpha - (cum - pr), 0, pr)              # mass taken from each level
+    return float(take @ en / alpha)
+
+
+def interp(params):
+    """INTERP warm start (Zhou et al., PRX 2020): depth p -> p+1 angles."""
+    p = len(params) // 2
+    def stretch(x):
+        x = np.concatenate([[0.0], x, [0.0]])
+        return np.array([(i / p) * x[i] + ((p - i) / p) * x[i + 1] for i in range(p + 1)])
+    return np.concatenate([stretch(params[:p]), stretch(params[p:])])
+
+
+def run_qaoa(diag, kind, alpha=1.0, max_p=6, restarts=4, seed=0):
+    rng = np.random.default_rng(seed)
+    target = np.isclose(diag, 0.0)
+    best, out = None, []
+    gmax, bmax = (0.3, np.pi / 2) if kind == "x" else (0.3, 2 * np.pi / 6)
+    for p in range(1, max_p + 1):
+        starts = [rng.uniform(0, [gmax] * p + [bmax] * p) for _ in range(restarts)]
+        if best is not None:
+            starts.append(interp(best))
+        runs = [minimize(objective, x0, args=(diag, kind, alpha), method="COBYLA",
+                         options={"maxiter": 250 * p}) for x0 in starts]
+        best = min(runs, key=lambda r: r.fun).x
+        probs = np.abs(qaoa_state(best, diag, kind)) ** 2
+        out.append({"p": p, "p_sol": float(probs[target].sum()), "params": best})
+    return out
+
+
+# --------------------------------------------------------------------------
+# Amplitude amplification (Grover) over the valid subspace
+# --------------------------------------------------------------------------
+def grover(diag, max_iter=40):
+    """Q = A S_0 A^dag S_f, with A = product of per-register prep unitaries.
+    A|0> is the uniform superposition over the 648 valid states; S_f flips the
+    sign of states with H = 0 (the oracle); A S_0 A^dag reflects about A|0>."""
+    marked = np.isclose(diag, 0.0)
+    start = initial_state("feasible")
+    state, curve = start.copy(), []
+    for k in range(max_iter + 1):
+        curve.append(float(np.sum(np.abs(state[marked]) ** 2)))
+        state = np.where(marked, -state, state)                  # oracle
+        state = 2 * start * np.vdot(start, state) - state        # diffuser
+    return curve
+
+
+# --------------------------------------------------------------------------
+if __name__ == "__main__":
+    H = build_cost_hamiltonian(CUBES)
+    diag = diagonal_from_poly(H)
+    feas = feasible_mask()
+    direct = np.array([classical_cost(CUBES, decode(i)) for i in range(DIM)])
+    assert np.allclose(diag, direct), "Pauli form does not match classical cost"
+
+    n_sol = int(np.isclose(diag, 0).sum())
+    n_feas = int(feas.sum())
+    print(f"Encoding: {N_QUBITS} qubits, {DIM} basis states, {n_feas} valid, {n_sol} solution")
+    print(f"Cost Hamiltonian: {len(H)} Pauli-Z terms, max order {max(len(k) for k in H)}; "
+          f"verified against classical cost on all {DIM} states")
+
+    # Check the gate-level mixer decomposition used in the Qiskit file
+    for reg in REGS:
+        A, beta, k = prep_unitary(reg), 0.37, len(reg["allowed"])
+        ph = np.eye(2 ** reg["width"], dtype=complex)
+        ph[0, 0] = np.exp(-1j * beta * k)
+        assert np.allclose(A @ ph @ A.conj().T, feasible_mixer(beta, reg))
+    print("Mixer decomposition A . phase(|0>) . A^dag verified for every register")
+
+    stack = to_physical_stack(CUBES, decode(int(np.argmin(diag))))
+    print("\nGround state decodes to (classically verified):")
+    print_stack(CUBES, COLORS, stack)
+
+    print(f"\nRandom guessing among valid states: P = 1/{n_feas} = {1/n_feas:.3%} "
+          f"(~{n_feas} shots to a hit)")
+
+    variants = [("A  X mixer + penalty, <H>", "x", 1.0),
+                ("B  feasible mixer, <H>", "feasible", 1.0),
+                ("C  feasible mixer, CVaR(0.1)", "feasible", 0.1)]
+    results = {}
+    for label, kind, alpha in variants:
+        results[label] = run_qaoa(diag, kind, alpha)
+
+    print("\nQAOA probability of measuring the solution:")
+    print("  p   " + "".join(f"{lbl[:30]:>32}" for lbl, _, _ in variants))
+    for i in range(6):
+        row = "".join(f"{results[lbl][i]['p_sol']:>31.2%} " for lbl, _, _ in variants)
+        print(f"  {i+1}  {row}")
+    for lbl, _, _ in variants:
+        ps = results[lbl][-1]["p_sol"]
+        print(f"  {lbl}: p=6 -> ~{1/ps:.0f} shots per solution")
+
+    curve = grover(diag)
+    k_opt = int(np.argmax(curve))
+    theta = np.arcsin(np.sqrt(n_sol / n_feas))
+    print(f"\nAmplitude amplification: theory k* = floor(pi/(4 theta)) = "
+          f"{int(np.floor(np.pi / (4 * theta)))}")
+    print(f"  simulated: peak P = {curve[k_opt]:.4f} at k = {k_opt} oracle calls "
+          f"(classical unstructured search: ~{(n_feas + 1) / 2:.0f} expected checks)")
+    print("  P vs iterations: " + ", ".join(f"k={k}:{curve[k]:.2f}" for k in (0, 5, 10, 15, k_opt, 30, 40)))
+
