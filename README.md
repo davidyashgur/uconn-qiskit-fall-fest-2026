@@ -56,6 +56,17 @@ Each round costs about 292 CX. Success climbs 3 to 5 points per round up to p �
 
 **What this does and does not show.** At p = 20, constrained QAOA puts about 87% of its shots on the single correct tower, about 2,800× a random valid choice. It is **not** faster than classical computing: brute force checks all 331,776 towers in about 0.1 s, and our angle tuning itself simulates the 6,561 valid choices classically. Depth is free on a noise-free simulator but not on real hardware: a 5,900-CX circuit would be dominated by noise on today's QPUs. Every SV1 result in the table sits within about one standard deviation of its exact value (1,000 shots give about ±1.5%). Across all our runs, one warm-up run came in 2.8 standard deviations low (24.5% vs 28.4%); the others matched. N = 6 needs 36 qubits, above SV1's 34-qubit limit, so with this encoding N = 5 is the largest size SV1 could run.
 
+### Experiment: 11 qubits instead of 24
+
+`experiments/compact_11_qubits.py` (output saved next to it) encodes each cube's 6 valid choices in 3 qubits as a binary number, and gives cube 1 only the 3 choices with front/back pair < left/right pair. That removes the quarter-turn symmetry and leaves exactly **1** correct bitstring of 2,048 on **11 qubits**. The same checks pass: the only cost-0 bitstring is the one the tower checker accepts, the Hamiltonian (built exactly with a Walsh-Hadamard transform, terms of up to 6 Z's) equals the cost on all 2,048 bitstrings, and our fast simulator matches Qiskit's `Statevector`.
+
+| Encoding | Qubits | Mixer | CX per layer | P(correct), p = 20, exact | 1,000 shots, p = 20 |
+|---|---|---|---|---|---|
+| one-hot (main result) | 24 | XY, constrained | ~290 | 85.4% | 86.7% on SV1 |
+| compact | 11 | `rx` + penalty for codes 6, 7 | ~480 | 33.8% | 30.2% on local Aer (our SV1 attempt did not finish in time) |
+
+Fewer qubits cost success rate and gates per layer, because the plain mixer is far weaker than the XY mixer. But qubit count is what limits SV1 (34 qubits), so the compact code would fit N ≈ 11 cubes instead of 5.
+
 **Next step.** A cube has only 6 valid choices, which fit in 3 qubits instead of 6. That halves the qubit count (N = 8 would fit in 24 qubits) at the cost of three-qubit Z terms in the Hamiltonian.
 
 ### All qBraid jobs
@@ -89,7 +100,7 @@ Random seeds are fixed (`SEED = 7`). SV1 shot results vary slightly from run to 
 We used **Claude Code** (Anthropic's AI coding agent) throughout:
 
 - It read the challenge files and proposed the approach (extending the warm-up's constrained QAOA to all 24 qubits).
-- It wrote the code in Sections 7 and 8 of `solution.ipynb`: the classical checks, the fast subspace simulator, the angle tuning, the decoder and the bonus generalization. It also set up this repository and drafted this README.
+- It wrote the code in Sections 7 and 8 of `solution.ipynb` and in `experiments/`: the classical checks, the fast subspace simulator, the angle tuning, the decoder and the bonus generalization. It also set up this repository and drafted this README.
 - We wrote `submit_job` ourselves; the agent reviewed it and caught two typos before we spent credits.
 
 How we checked its output: every piece of generated code is backed by a classical check in the notebook. The Hamiltonian is compared with brute-force cost on every valid choice, the fast simulator is compared with Qiskit Aer on the real 24-qubit circuit, the decoder is tested on the known answer, and every reported tower is verified with the starter's own `solves` checker.
@@ -101,5 +112,6 @@ How we checked its output: every piece of generated code is backed by a classica
 ├── slides.pdf         presentation
 ├── solution.ipynb     main notebook, saved with outputs
 ├── requirements.txt   Python packages (same as the challenge)
+├── experiments/       the 11-qubit experiment and its saved output
 └── resources/         helpers.py and __init__.py from the challenge starter
 ```

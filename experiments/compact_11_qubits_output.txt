@@ -1,0 +1,17 @@
+11 qubits: 648 valid bitstrings of 2048
+cost 0 on [1414]; pass the tower check: [1414]; same: True
+the one answer: [(1, 2), (0, 2), (2, 0), (2, 1)] | next lowest cost: 2.0
+129 Pauli terms; largest has 6 Z's
+largest gap between H and the cost list on all 2,048 bitstrings: 0.0e+00
+fast simulator vs Statevector of the real circuit, p=2, random angles: 1.1e-17
+tuned p = 1 to 20 in 43 s
+
+ p   P(correct tower)   P(valid code)   CX gates   depth
+ 1               0.4%             74%        484     520
+ 2               0.9%             95%        968     993
+ 4               2.1%             98%       1936    1939
+ 8               8.8%             99%       3872    3831
+12              17.3%             99%       5808    5723
+16              24.5%            100%       7744    7615
+20              33.8%            100%       9680    9507
+11 qubits, p=20, 1000 shots on local Aer: 30.2% correct towers (exact 33.8%), 100% of shots valid in every cube
